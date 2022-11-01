@@ -1,0 +1,208 @@
+---
+title: "horror"
+author: "Jon Minton"
+date: "2022-11-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Links/background 
+
+- [Link to the page](https://github.com/rfordatascience/tidytuesday/tree/master/data/2022/2022-11-01)
+- [Link to the data description](https://github.com/rfordatascience/tidytuesday/tree/master/data/2022/2022-11-01#data-dictionary)
+
+## Packages and data 
+
+```{r}
+library(tidyverse)
+dta <- read_csv("https://github.com/rfordatascience/tidytuesday/raw/master/data/2022/2022-11-01/horror_movies.csv")
+
+
+```
+
+## Inspect 
+
+Any quirks/errors etc? 
+```{r}
+dta
+```
+Issues 
+
+- missing labelled as 0 for `budget`, `revenue`, `runtime`
+- adult: the adult flag not described in the github page 
+
+Opportunities/questions
+
+- runlength: Has there been any trend towards higher or lower run length over time? 
+- linked genres: what are the most and least common genres that are paired with horror? - profitability: What's the relationship between budget and return? 
+    - modelling of profitability: what variables explain higher returns (relative or absolute)? 
+
+
+More advanced possibilities:
+
+- inflation adjustment: use another package to pull inflation rates and inflation adjust both budgets and returns
+- key terms: apply something like term document frequency approach to the description. Are implied topic memberships predictive of either genres or return?  
+- image analysis: There are links to the posters. I remember seeing a data science example where the average hue/colour wheel for different posters were calculated for different film genres. (As expected horror and thrillers tended to use darkest average hues)
+
+
+
+## Question one: has runlength changed over time? 
+
+```{r}
+dta %>% 
+  filter(runtime != 0) %>% 
+  ggplot(aes(release_date, runtime)) + 
+  geom_point()
+
+```
+
+There are a small number of exceptionally long horror films. What are they?  
+
+```{r}
+dta %>% 
+  filter(runtime > 600)
+```
+
+These appear to in effect be TV series released as films 
+
+And there are some films that are long but not as long
+
+```{r}
+dta %>% 
+  filter(between(runtime, 300, 600)) 
+```
+
+Again, these appear to be series. 
+
+I'm going to look at films up to 300 minutes, and use some translucency to better check for a trend 
+
+```{r}
+dta %>% 
+  filter(between(runtime, 1, 299)) %>% 
+  ggplot(aes(release_date, runtime)) + 
+  geom_point(alpha = 0.15)
+```
+
+It looks like the average length of horror films increased slightly over the 60s, but has remained in the 90-100 min range ever since. 
+
+Since the 2000s it appears two things have happened:
+
+- the variation in feature length films has increased slightly
+- there has been an increase in short films. Perhaps this is due to the internet and easier distribution of independent content? 
+
+The bifurcation in film lengths since around 2000 means fitting a single smoother line to the data appears a bad idea. 
+
+Let's look at some examples of short films since around 2000
+
+```{r}
+dta %>% 
+  filter(between(runtime, 1, 50)) %>% 
+  filter(release_date >= lubridate::ymd("2000-01-01")) %>% 
+  sample_n(30)
+```
+
+Many of these do not have a budget or revenue listed against them, suggesting they were not officially released. Perhaps many of these were 'calling cards' for new directors/talent etc? 
+
+Some of these are documentaries. I wonder if some of these short horror films could in fact be short 'making of' features released alongside DVD releases of full length horror films? 
+
+We can perhaps test this by looking for 'Documentary' in genre_names
+
+```{r}
+dta %>% 
+  filter(between(runtime, 1, 400)) %>% 
+  mutate(is_documentary = str_detect(genre_names, "Documentary")) %>% 
+  ggplot() +
+  ggridges::geom_density_ridges(aes(runtime, is_documentary), alpha = 0.5) 
+
+```
+As the above function uses a density estimator it's technically wrong as it has nonzero density for negative runtimes. It suggests that there's more variation in runtime for documentaries than other genres, however. 
+
+## Return on investment 
+
+What's the relationship between budget and revenue? 
+
+```{r}
+dta %>% 
+  filter(budget > 0, revenue > 0) %>% 
+  ggplot() + 
+  geom_point(aes(x = budget, y = revenue)) 
+```
+
+No obvious relationship. Does a double log scale help? 
+
+
+```{r}
+dta %>% 
+  filter(budget > 0, revenue > 0) %>% 
+  ggplot() + 
+  geom_point(aes(x = budget, y = revenue)) +
+  scale_y_log10() + 
+  scale_x_log10() 
+
+```
+Now the relationship is clearer. Let's tidy this up a bit more 
+
+```{r}
+
+bks <- c(
+  1e2, 1e3, 
+  1e4, 1e5,
+  2e5, 5e5,
+  1e6, 2e6,
+  5e6, 1e7,
+  2e7, 5e7,
+  1e8, 2e8, 5e8
+)
+
+lbls <- c(
+  "100", "1k",
+  "10k", "100k",
+  "200k", "500k",
+  "1M", "2M",
+  "5M", "10M",
+  "20M", "50M",
+  "100M", "200M", "500M"
+)
+
+dta %>% 
+  filter(budget > 0, revenue > 0) %>% 
+  ggplot(aes(x = budget, y = revenue)) + 
+  geom_point(alpha = 0.2) +
+  scale_y_log10(breaks = bks, labels = lbls) + 
+  scale_x_log10(breaks = bks, labels = lbls) +
+  coord_fixed() + 
+  stat_smooth(method = "lm") + 
+  geom_abline(slope = 1, intercept = 0, colour = "red", linetype = "dashed") + 
+  labs(x = "Budget ($)", y = "Revenue ($)") 
+
+```
+The predicted line is above the equality line (red dashed line). So, the average revenue of horror films is greater than the average budget. 
+
+I guess this is why horror films are made! 
+
+
+### Modelling 
+
+We know there's an above-zero return on investment, but what factors push this return up or down? 
+
+```{r}
+dta_prep <- dta %>% 
+  filter(budget > 0, revenue > 0, runtime > 0) %>% 
+  mutate(roi = revenue / budget)
+
+mod_00 <- lm(roi ~ 1, dta_prep)
+summary(mod_00)
+
+# This suggests average revenue of $24 for each $1 invested. If true this is crazy! 
+
+# Let's check this again 
+mod_00a <- lm(log(revenue) ~ log(budget), dta_prep)
+
+exp(predict(mod_00a, newdata = tibble(budget = c(1e5, 1e6, 1e7))))
+
+# This suggests more modest returns, but still in the right direction
+```
+
