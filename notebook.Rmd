@@ -176,7 +176,12 @@ dta %>%
   coord_fixed() + 
   stat_smooth(method = "lm") + 
   geom_abline(slope = 1, intercept = 0, colour = "red", linetype = "dashed") + 
-  labs(x = "Budget ($)", y = "Revenue ($)") 
+  labs(x = "Budget ($)", y = "Revenue ($)",
+       title = "Budget against revenues, log-log scale",
+       subtitle = "Regardless of budget size, horror films on average make money",
+       caption = "Source: https://github.com/rfordatascience/tidytuesday/tree/master/data/2022/2022-11-01") +
+  ggdark::dark_theme_grey() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
 
 ```
 The predicted line is above the equality line (red dashed line). So, the average revenue of horror films is greater than the average budget. 
@@ -190,19 +195,214 @@ We know there's an above-zero return on investment, but what factors push this r
 
 ```{r}
 dta_prep <- dta %>% 
-  filter(budget > 0, revenue > 0, runtime > 0) %>% 
-  mutate(roi = revenue / budget)
+  filter(budget > 0, revenue > 0, runtime > 0) 
 
-mod_00 <- lm(roi ~ 1, dta_prep)
-summary(mod_00)
+mod_00 <- lm(log(revenue) ~ log(budget), dta_prep)
 
-# This suggests average revenue of $24 for each $1 invested. If true this is crazy! 
+df_preds <- tibble(
+  budget = bks,
+  pred_revenue = exp(predict(mod_00, newdata = tibble(budget = bks)))
+) %>% 
+  mutate(
+    roi = (pred_revenue - budget) / budget
+  )
 
-# Let's check this again 
-mod_00a <- lm(log(revenue) ~ log(budget), dta_prep)
+df_preds
+```
 
-exp(predict(mod_00a, newdata = tibble(budget = c(1e5, 1e6, 1e7))))
+This suggests that low budget (\$1M) films can be expected to get around a 70% ROI, falling to around 60% at \$10M, to around 45% at \$100M. 
 
-# This suggests more modest returns, but still in the right direction
+What's the median budget for a horror film (considering only last 20 years)?
+
+
+```{r}
+dta_prep %>% 
+  filter(release_date >= lubridate::dmy("01-01-2002")) %>% 
+  summarise(
+    med_budget = median(budget),
+    lower_q_budget = quantile(budget, 0.25),
+    upper_q_budget = quantile(budget, 0.75)
+  )
+
+```
+
+So the median horror film costs around \$6M, and half of all films have budgets between \$1M and around \$17M. 
+
+
+Anyway, what other factors affect the predicted revenue? 
+
+```{r}
+
+ 
+mod_01 <-   lm(log(revenue) ~ log(budget) + runtime, dta_prep)
+mod_02 <-   lm(log(revenue) ~ log(budget) + poly(runtime, 2), dta_prep)
+mod_03 <-   lm(log(revenue) ~ log(budget) + poly(runtime, 3), dta_prep)
+
+anova(mod_00, mod_01, mod_02, mod_03)
+```
+
+This suggests runtime linearly increases predicted revenue (though should be careful with extrapolating to very long runtimes). 
+
+```{r}
+mod_04 <- lm(log(revenue) ~ log(budget) + runtime + is_not_english, 
+             dta_prep %>% mutate(is_not_english = original_language != "en"))
+
+anova(mod_01, mod_04)
+```
+
+Non-English films have lower predicted returns, but this isn't quite statistically significant. 
+
+```{r}
+mod_05 <- lm(log(revenue) ~ log(budget) + runtime + release_date, dta_prep)
+anova(mod_01, mod_05)
+```
+
+Adding a time term does seem to improve fit. However polynomials can't be calculated directly with datetime objects. Maybe they can if just the year and month component is included
+
+```{r}
+mod_06 <- lm(
+  log(revenue) ~ log(budget) + runtime + poly(year, 2), 
+  dta_prep %>% 
+    mutate(year = lubridate::year(release_date) + lubridate::month(release_date) / 12)
+  )
+
+anova(mod_05, mod_06)
+```
+So a polynomial on time does seem to improve fit. 
+
+Let's now consider a couple more potential variables: 
+
+- Whether it's part of a collection
+- Whether it's a pure horror or mixed genre
+
+```{r}
+mod_07 <- lm(
+  log(revenue) ~ log(budget) + runtime + poly(year, 2) + is_collection, 
+  dta_prep %>% 
+    mutate(
+      year = lubridate::year(release_date) + lubridate::month(release_date) / 12,
+      is_collection = !is.na(collection_name)
+      )
+  )
+summary(mod_07)
+# So, it appears being part of a collection/franchise increases revenues
+anova(mod_06, mod_07)
+
+```
+
+```{r}
+
+mod_08 <- lm(
+  log(revenue) ~ log(budget) + runtime + poly(year, 2) + is_collection, 
+  dta_prep %>% 
+    mutate(
+      year = lubridate::year(release_date) + lubridate::month(release_date) / 12,
+      is_collection = !is.na(collection_name)
+      )
+  )
+
+dta_prep %>% 
+  mutate(
+    year = lubridate::year(release_date) + lubridate::month(release_date) / 12,
+    is_collection = !is.na(collection_name)
+  ) %>% 
+  mutate(
+    num_additional_genres = stringr::str_count(genre_names, ","),
+    horror_first = stringr::str_extract(genre_names, "^[A-Za-z]*") == "Horror",
+    mixed_genres = num_additional_genres > 0
+  ) %>% 
+  lm( 
+    log(revenue) ~ log(budget) + runtime + poly(year, 2) + is_collection + mixed_genres, 
+    data = . 
+  ) -> mod_09
+summary(mod_09)
+anova(mod_08, mod_09)
+# Looks like mixed_genres doesn't add to model fit
+
+dta_prep %>% 
+  mutate(
+    year = lubridate::year(release_date) + lubridate::month(release_date) / 12,
+    is_collection = !is.na(collection_name)
+  ) %>% 
+  mutate(
+    num_additional_genres = stringr::str_count(genre_names, ","),
+    horror_first = stringr::str_extract(genre_names, "^[A-Za-z]*") == "Horror",
+    mixed_genres = num_additional_genres > 0
+  ) %>% 
+  lm( 
+    log(revenue) ~ log(budget) + runtime + poly(year, 2) + is_collection + horror_first, 
+    data = . 
+  ) -> mod_10
+summary(mod_10)
+anova(mod_08, mod_10)
+# But knowing something is first and foremost a horror genre does predict 
+# revenue
+
+
+dta_prep %>% 
+  mutate(
+    year = lubridate::year(release_date) + lubridate::month(release_date) / 12,
+    is_collection = !is.na(collection_name)
+  ) %>% 
+  mutate(
+    num_additional_genres = stringr::str_count(genre_names, ","),
+    horror_first = stringr::str_extract(genre_names, "^[A-Za-z]*") == "Horror",
+    mixed_genres = num_additional_genres > 0
+  ) %>% 
+  lm( 
+    log(revenue) ~ log(budget) + runtime + poly(year, 2) + is_collection + horror_first + num_additional_genres, 
+    data = . 
+  ) -> mod_11
+summary(mod_11)
+anova(mod_10, mod_11)
+
+# Number of additional genres doesn't have a statistically signifant effect on 
+#log revenues
+
+# So, our best model is mod_10
+
+#    log(revenue) ~ log(budget) + runtime + poly(year, 2) + is_collection + horror_first
+```
+
+### Predictions 
+
+Having iterated through a few model specifications, we can use our best model to project revenues for a number of different scenarios. Let's consider the following:
+
+- Budget: \$1M, \$5M, \$10M, \$20M
+- runtime: 80m, 90m, 100m
+- year: 1985, 1995, 2005, 2015
+- collection: TRUE, FALSE
+- horror_first: TRUE, FALSE
+
+
+```{r}
+df_scenarios <- expand_grid(
+  budget = c(1e6, 5e6, 1e7, 2e7),
+  runtime = c(80, 90, 100),
+  year = c(1985, 1995, 2005, 2015),
+  is_collection = c(TRUE, FALSE),
+  horror_first = c(TRUE, FALSE)
+)
+
+predictions <- 
+  bind_cols(
+    df_scenarios,
+    predicted_revenue = predict(mod_10, newdata = df_scenarios) %>% exp()
+  ) %>% 
+    mutate(
+      predicted_profit = predicted_revenue - budget,
+      predicted_roi = predicted_revenue / budget
+    )
+
+predictions
+```
+
+There are a lot of scenarios here. So perhaps we should create a little app for allowing the user to select between them? 
+
+```{r}
+write_rds(predictions, "data/scenarios_and_predictions.rds")
+write_rds(predictions, "show_predictions/scenarios_and_predictions.rds")
+
+
 ```
 
